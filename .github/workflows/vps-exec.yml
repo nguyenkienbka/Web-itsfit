@@ -1,0 +1,146 @@
+name: VPS Exec
+
+# Chạy lệnh trên VPS itsfitlab qua SSH từ GitHub runner.
+# Runner không bị giới hạn egress như sandbox, nên đây là đường duy nhất
+# để tự động hoá thay cho việc SSH thủ công.
+#
+# Secrets cần cấu hình (Settings -> Secrets and variables -> Actions):
+#   VPS_HOST        129.150.51.181
+#   VPS_USER        user SSH (vd: ubuntu / opc / root)
+#   VPS_SSH_KEY     private key dạng OpenSSH, dán nguyên khối kể cả dòng BEGIN/END
+#   VPS_PORT        (tuỳ chọn) mặc định 22
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Lệnh shell chạy trên VPS'
+        required: true
+        type: string
+      workdir:
+        description: 'Thư mục làm việc trên VPS'
+        required: false
+        type: string
+        default: '~'
+      timeout_seconds:
+        description: 'Giới hạn thời gian chạy lệnh (giây)'
+        required: false
+        type: string
+        default: '300'
+
+concurrency:
+  group: vps-exec
+  cancel-in-progress: false
+
+jobs:
+  exec:
+    name: Run on VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Kiểm tra secrets
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          missing=""
+          [ -z "$VPS_HOST" ]    && missing="$missing VPS_HOST"
+          [ -z "$VPS_USER" ]    && missing="$missing VPS_USER"
+          [ -z "$VPS_SSH_KEY" ] && missing="$missing VPS_SSH_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Thiếu secrets:$missing"
+            exit 1
+          fi
+          echo "Secrets đầy đủ."
+
+      - name: Nạp SSH key
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          set -euo pipefail
+          port="${VPS_PORT:-22}"
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_vps
+          chmod 600 ~/.ssh/id_vps
+
+          # Pin host key ngay lần đầu để tránh MITM thay vì tắt StrictHostKeyChecking.
+          if ! ssh-keyscan -p "$port" -T 15 "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null; then
+            echo "::error::Không lấy được host key từ $VPS_HOST:$port"
+            exit 1
+          fi
+          chmod 600 ~/.ssh/known_hosts
+          echo "SSH key và known_hosts đã sẵn sàng."
+
+      - name: Thực thi lệnh
+        id: run
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          CMD: ${{ inputs.command }}
+          WORKDIR: ${{ inputs.workdir }}
+          CMD_TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          set -uo pipefail
+          port="${VPS_PORT:-22}"
+
+          echo "::group::Lệnh sẽ chạy"
+          printf '%s\n' "$CMD"
+          echo "::endgroup::"
+
+          # CMD đi qua biến môi trường, không nội suy vào chuỗi lệnh,
+          # nên nội dung lệnh không thể phá vỡ cú pháp phía remote.
+          set +e
+          ssh -i ~/.ssh/id_vps \
+              -p "$port" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=20 \
+              -o ServerAliveInterval=15 \
+              "${VPS_USER}@${VPS_HOST}" \
+              "CMD=$(printf '%q' "$CMD") WORKDIR=$(printf '%q' "$WORKDIR") T=$(printf '%q' "$CMD_TIMEOUT") bash -s" <<'REMOTE' 2>&1 | tee /tmp/vps-output.txt
+          set -uo pipefail
+          cd "${WORKDIR:-$HOME}" || { echo "Không vào được thư mục: $WORKDIR"; exit 1; }
+          echo "--- host: $(hostname) | pwd: $(pwd) | user: $(whoami) ---"
+          timeout "${T:-300}" bash -lc "$CMD"
+          rc=$?
+          echo "--- exit code: $rc ---"
+          exit $rc
+          REMOTE
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      - name: Tóm tắt kết quả
+        if: always()
+        run: |
+          {
+            echo "### VPS Exec"
+            echo
+            echo "**Exit code:** \`${{ steps.run.outputs.exit_code || 'n/a' }}\`"
+            echo
+            echo "**Lệnh:**"
+            echo '```sh'
+            printf '%s\n' "${{ inputs.command }}"
+            echo '```'
+            echo
+            echo "**Output:**"
+            echo '```'
+            if [ -f /tmp/vps-output.txt ]; then
+              tail -c 60000 /tmp/vps-output.txt
+            else
+              echo "(không có output — kết nối thất bại trước khi chạy lệnh)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dọn key
+        if: always()
+        run: rm -f ~/.ssh/id_vps
