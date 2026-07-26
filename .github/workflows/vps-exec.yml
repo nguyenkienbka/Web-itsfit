@@ -6,9 +6,15 @@ name: VPS Exec
 #
 # Secrets cần cấu hình (Settings -> Secrets and variables -> Actions):
 #   VPS_HOST        129.150.51.181
-#   VPS_USER        user SSH (vd: ubuntu / opc / root)
-#   VPS_SSH_KEY     private key dạng OpenSSH, dán nguyên khối kể cả dòng BEGIN/END
+#   VPS_USER        user SSH (vd: root / ubuntu / opc)
 #   VPS_PORT        (tuỳ chọn) mặc định 22
+#
+# Xác thực — cấu hình MỘT trong hai, key được ưu tiên nếu có cả hai:
+#   VPS_SSH_KEY     private key dạng OpenSSH, dán nguyên khối kể cả dòng BEGIN/END
+#   VPS_PASSWORD    mật khẩu SSH
+#
+# Không bao giờ đặt thông tin xác thực thẳng vào file này — nó nằm lại
+# trong git history vĩnh viễn. Chỉ dùng secrets.
 
 on:
   workflow_dispatch:
@@ -44,20 +50,25 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
         run: |
           missing=""
-          [ -z "$VPS_HOST" ]    && missing="$missing VPS_HOST"
-          [ -z "$VPS_USER" ]    && missing="$missing VPS_USER"
-          [ -z "$VPS_SSH_KEY" ] && missing="$missing VPS_SSH_KEY"
+          [ -z "$VPS_HOST" ] && missing="$missing VPS_HOST"
+          [ -z "$VPS_USER" ] && missing="$missing VPS_USER"
           if [ -n "$missing" ]; then
             echo "::error::Thiếu secrets:$missing"
             exit 1
           fi
+          if [ -z "$VPS_SSH_KEY" ] && [ -z "$VPS_PASSWORD" ]; then
+            echo "::error::Cần ít nhất một trong hai: VPS_SSH_KEY hoặc VPS_PASSWORD"
+            exit 1
+          fi
           echo "Secrets đầy đủ."
 
-      - name: Nạp SSH key
+      - name: Chuẩn bị xác thực
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
         run: |
@@ -66,8 +77,18 @@ jobs:
 
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_vps
-          chmod 600 ~/.ssh/id_vps
+
+          if [ -n "$VPS_SSH_KEY" ]; then
+            printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_vps
+            chmod 600 ~/.ssh/id_vps
+            echo "auth_mode=key" >> "$GITHUB_ENV"
+            echo "Dùng xác thực bằng SSH key."
+          else
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq sshpass
+            echo "auth_mode=password" >> "$GITHUB_ENV"
+            echo "Dùng xác thực bằng password."
+          fi
 
           # Pin host key ngay lần đầu để tránh MITM thay vì tắt StrictHostKeyChecking.
           if ! ssh-keyscan -p "$port" -T 15 "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null; then
@@ -75,7 +96,7 @@ jobs:
             exit 1
           fi
           chmod 600 ~/.ssh/known_hosts
-          echo "SSH key và known_hosts đã sẵn sàng."
+          echo "known_hosts đã sẵn sàng."
 
       - name: Thực thi lệnh
         id: run
@@ -83,6 +104,7 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
           CMD: ${{ inputs.command }}
           WORKDIR: ${{ inputs.workdir }}
           CMD_TIMEOUT: ${{ inputs.timeout_seconds }}
@@ -94,12 +116,20 @@ jobs:
           printf '%s\n' "$CMD"
           echo "::endgroup::"
 
+          if [ "${auth_mode}" = "key" ]; then
+            SSH_BIN=(ssh -i ~/.ssh/id_vps -o BatchMode=yes)
+          else
+            # -e: sshpass đọc mật khẩu từ biến SSHPASS nên nó không
+            # xuất hiện trong danh sách tiến trình.
+            SSH_BIN=(sshpass -e ssh -o PubkeyAuthentication=no
+                     -o PreferredAuthentications=password)
+          fi
+
           # CMD đi qua biến môi trường, không nội suy vào chuỗi lệnh,
           # nên nội dung lệnh không thể phá vỡ cú pháp phía remote.
           set +e
-          ssh -i ~/.ssh/id_vps \
+          SSHPASS="${VPS_PASSWORD:-}" "${SSH_BIN[@]}" \
               -p "$port" \
-              -o BatchMode=yes \
               -o ConnectTimeout=20 \
               -o ServerAliveInterval=15 \
               "${VPS_USER}@${VPS_HOST}" \
@@ -141,6 +171,6 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Dọn key
+      - name: Dọn thông tin xác thực
         if: always()
         run: rm -f ~/.ssh/id_vps
