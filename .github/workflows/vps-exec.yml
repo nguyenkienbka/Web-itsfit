@@ -152,7 +152,15 @@ jobs:
               "${VPS_USER}@${VPS_HOST}" \
               "CMD=$(printf '%q' "$CMD") WORKDIR=$(printf '%q' "$WORKDIR") T=$(printf '%q' "$CMD_TIMEOUT") bash -s" <<'REMOTE' 2>&1 | tee /tmp/vps-output.txt
           set -uo pipefail
-          cd "${WORKDIR:-$HOME}" || { echo "Không vào được thư mục: $WORKDIR"; exit 1; }
+          # WORKDIR tới đây đã được printf %q bọc trong nháy đơn, nên shell
+          # không expand tilde nữa — phải tự xử lý, nếu không cd '~' sẽ đi
+          # tìm thư mục có tên đúng là dấu ngã.
+          case "${WORKDIR:-}" in
+            ""|"~")  target="$HOME" ;;
+            "~/"*)   target="$HOME/${WORKDIR#\~/}" ;;
+            *)       target="$WORKDIR" ;;
+          esac
+          cd "$target" || { echo "Không vào được thư mục: $target"; exit 1; }
           echo "--- host: $(hostname) | pwd: $(pwd) | user: $(whoami) ---"
           timeout "${T:-300}" bash -lc "$CMD"
           rc=$?
