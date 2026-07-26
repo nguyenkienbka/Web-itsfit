@@ -49,12 +49,21 @@ jobs:
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
         run: |
+          # Host/user/port không bao giờ chứa khoảng trắng hợp lệ, nhưng dán vào
+          # ô secret rất dễ dính tab hoặc newline thừa — ssh sẽ báo
+          # "hostname contains invalid characters". Chuẩn hoá một lần tại đây
+          # rồi các step sau dùng giá trị đã sạch qua GITHUB_ENV.
+          host=$(printf '%s' "$VPS_HOST" | tr -d '[:space:]')
+          user=$(printf '%s' "$VPS_USER" | tr -d '[:space:]')
+          port=$(printf '%s' "${VPS_PORT:-}" | tr -d '[:space:]')
+
           missing=""
-          [ -z "$VPS_HOST" ] && missing="$missing VPS_HOST"
-          [ -z "$VPS_USER" ] && missing="$missing VPS_USER"
+          [ -z "$host" ] && missing="$missing VPS_HOST"
+          [ -z "$user" ] && missing="$missing VPS_USER"
           if [ -n "$missing" ]; then
             echo "::error::Thiếu secrets:$missing"
             exit 1
@@ -63,14 +72,25 @@ jobs:
             echo "::error::Cần ít nhất một trong hai: VPS_SSH_KEY hoặc VPS_PASSWORD"
             exit 1
           fi
+
+          if [ "$host" != "$VPS_HOST" ] || [ "$user" != "$VPS_USER" ]; then
+            echo "::warning::Đã loại bỏ khoảng trắng thừa trong VPS_HOST/VPS_USER."
+          fi
+
+          {
+            echo "VPS_HOST=$host"
+            echo "VPS_USER=$user"
+            echo "VPS_PORT=${port:-22}"
+          } >> "$GITHUB_ENV"
           echo "Secrets đầy đủ."
 
+      # VPS_HOST và VPS_PORT cố tình không khai báo ở đây: chúng đến từ
+      # GITHUB_ENV với giá trị đã chuẩn hoá. Khai báo lại ở step env sẽ
+      # ghi đè bằng giá trị secret thô còn dính khoảng trắng.
       - name: Chuẩn bị xác thực
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_PORT: ${{ secrets.VPS_PORT }}
         run: |
           set -euo pipefail
           port="${VPS_PORT:-22}"
@@ -101,9 +121,6 @@ jobs:
       - name: Thực thi lệnh
         id: run
         env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_PORT: ${{ secrets.VPS_PORT }}
           VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
           CMD: ${{ inputs.command }}
           WORKDIR: ${{ inputs.workdir }}
