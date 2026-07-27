@@ -173,17 +173,23 @@ jobs:
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
 
+      # Nội dung lệnh phải đi qua env, không được nội suy ${{ }} thẳng vào
+      # script: một dấu nháy trong lệnh sẽ thoát ra khỏi chuỗi và chạy như
+      # mã của runner. Đây là script injection, không chỉ là lỗi hiển thị.
       - name: Tóm tắt kết quả
         if: always()
+        env:
+          CMD: ${{ inputs.command }}
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
         run: |
           {
             echo "### VPS Exec"
             echo
-            echo "**Exit code:** \`${{ steps.run.outputs.exit_code || 'n/a' }}\`"
+            echo "**Exit code:** \`${EXIT_CODE:-n/a}\`"
             echo
             echo "**Lệnh:**"
             echo '```sh'
-            printf '%s\n' "${{ inputs.command }}"
+            printf '%s\n' "$CMD"
             echo '```'
             echo
             echo "**Output:**"
