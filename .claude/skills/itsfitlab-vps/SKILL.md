@@ -80,6 +80,39 @@ Workflow hỗ trợ cả `VPS_SSH_KEY` (qua `ssh -i`) lẫn `VPS_PASSWORD` (qua 
 
 Đây là ảnh chụp tại thời điểm đó, không phải trạng thái hiện tại — cần số liệu mới thì chạy lệnh kiểm tra lại.
 
+## Website itsfitlab.com trên máy này
+
+WordPress 7.0.2 + WooCommerce, EasyEngine-style, đứng sau Cloudflare.
+
+- Webroot `/var/www/itsfitlab.com/htdocs`, wp-cli tại `/usr/local/bin/wp` (cần `--allow-root`)
+- Site config `/etc/nginx/sites-available/itsfitlab.com`, `server_name itsfitlab.com www.itsfitlab.com`
+- Cache config `/etc/nginx/common/wpfc.conf` (include ở dòng 36 của site config)
+- fastcgi cache ở `/run/nginx-cache`, keys_zone `WORDPRESS`, `fastcgi_cache_valid 200 30d`
+
+**Test HTTP phải dùng HTTPS.** `curl http://127.0.0.1/...` chỉ nhận redirect 80→443, chưa chạm WordPress. Dùng:
+
+```sh
+curl -skI --resolve itsfitlab.com:443:127.0.0.1 https://itsfitlab.com/<path>
+```
+
+**Sự cố markdown (đã xử lý 2026-07-27).** `fastcgi_cache_key` là `"$scheme$request_method$host$request_uri"` — không chứa `Accept`, trong khi origin trả `Vary: accept`. Một request `Accept: text/markdown` từng sinh bản markdown rồi đè lên bản HTML dùng chung entry, làm 6 URL phát markdown thô cho mọi khách.
+
+Đã thêm vào cuối `wpfc.conf`:
+
+```nginx
+if ($http_accept ~* "text/markdown") {
+    set $skip_cache 1;
+}
+```
+
+Bản markdown vẫn phục vụ được nhưng không vào cache. Nếu tái diễn, tìm và xoá đúng entry hỏng thay vì xoá sạch cache:
+
+```sh
+grep -rli 'content-type: *text/markdown' /run/nginx-cache/
+```
+
+**Sau `systemctl reload nginx`, đừng test ngay.** Reload là graceful, worker cũ vẫn phục vụ vài giây — một lần kiểm chứng đã báo `HIT` nhầm rồi mới ra `BYPASS` ở lượt sau.
+
 ## Lưu ý an toàn
 
 Lệnh chạy dưới quyền `root`. Với thao tác khó đảo ngược (xoá dữ liệu, sửa config đang phục vụ, restart service production), xác nhận với người dùng trước. Đọc file config trước khi ghi đè.
